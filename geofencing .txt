@@ -1,0 +1,165 @@
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+
+static const int RXPin = 3, TXPin = 2;
+static const uint32_t GPSBaud = 9600;
+
+static const int SIM800L_RX = 4, SIM800L_TX = 5;
+
+TinyGPSPlus gps;
+
+SoftwareSerial gpsSerial(RXPin, TXPin);
+SoftwareSerial sim800l(SIM800L_RX, SIM800L_TX);
+
+const double PERIMETER_LAT_MIN = 40.7128;  // Minimum latitude
+const double PERIMETER_LAT_MAX = 40.7138;  // Maximum latitude  
+const double PERIMETER_LON_MIN = -74.0060; // Minimum longitude
+const double PERIMETER_LON_MAX = -74.0050; // Maximum longitude
+
+const String PHONE_NUMBER = "+2348102485167";
+
+// Alert tracking variables
+bool isInsidePerimeter = true;
+bool alertSent = false;
+unsigned long lastSMSTime = 0;
+const unsigned long SMS_COOLDOWN = 300000; // 5 minutes between SMS alerts
+
+void setup() {
+  Serial.begin(9600);
+  gpsSerial.begin(GPSBaud);
+  sim800l.begin(9600);
+  
+  Serial.println("Animal Perimeter Monitoring System Started");
+  Serial.println("Initializing SIM800L...");
+  
+  // Initialize SIM800L module
+  initializeSIM800L();
+  
+  // Send startup SMS
+  sendSMS("System started. Monitoring animal perimeter.");
+  
+  Serial.println("System Ready - Monitoring Perimeter...");
+}
+
+void loop() {
+  // Read GPS data
+  while (gpsSerial.available() > 0) {
+    char c = gpsSerial.read();
+    gps.encode(c);
+
+    // Debug: print raw GPS data as it comes in
+    Serial.write(c);
+  }
+
+  // Process GPS data
+  if (gps.location.isUpdated()) {
+    processGPSData();
+  }
+
+  // Debug: print GPS stats every 5 seconds
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 5000) {
+    Serial.println();
+    Serial.print("Chars Processed: "); Serial.println(gps.charsProcessed());
+    Serial.print("Sentences with Fix: "); Serial.println(gps.sentencesWithFix());
+    Serial.print("Failed Checksum: "); Serial.println(gps.failedChecksum());
+    Serial.print("Satellites: "); Serial.println(gps.satellites.value());
+    if (gps.location.isValid()) {
+      Serial.print("Current Lat: "); Serial.println(gps.location.lat(), 6);
+      Serial.print("Current Lon: "); Serial.println(gps.location.lng(), 6);
+    } else {
+      Serial.println("Location not valid yet...");
+    }
+    lastDebug = millis();
+  }
+
+  delay(100);
+}
+
+void processGPSData() {
+  double currentLat = gps.location.lat();
+  double currentLon = gps.location.lng();
+  
+  // Print current position for debugging
+  Serial.print("Position: ");
+  Serial.print(currentLat, 6);
+  Serial.print(", ");
+  Serial.print(currentLon, 6);
+  Serial.print(" | Satellites: ");
+  Serial.println(gps.satellites.value());
+  
+  // Check if position is within perimeter
+  bool currentlyInside = isWithinPerimeter(currentLat, currentLon);
+  
+  // Handle perimeter breach detection
+  if (isInsidePerimeter && !currentlyInside) {
+    Serial.println("ALERT: Animal has left the perimeter!");
+    sendPerimeterAlert(currentLat, currentLon, "LEFT");
+    isInsidePerimeter = false;
+    alertSent = true;
+    lastSMSTime = millis();
+  }
+  else if (!isInsidePerimeter && currentlyInside) {
+    Serial.println("Animal has returned to perimeter");
+    sendPerimeterAlert(currentLat, currentLon, "RETURNED");
+    isInsidePerimeter = true;
+    alertSent = false;
+  }
+  else if (!currentlyInside && !alertSent && 
+           (millis() - lastSMSTime > SMS_COOLDOWN)) {
+    Serial.println("REMINDER: Animal is still outside perimeter!");
+    sendPerimeterAlert(currentLat, currentLon, "STILL_OUTSIDE");
+    lastSMSTime = millis();
+  }
+}
+
+bool isWithinPerimeter(double lat, double lon) {
+  return (lat >= PERIMETER_LAT_MIN && lat <= PERIMETER_LAT_MAX &&
+          lon >= PERIMETER_LON_MIN && lon <= PERIMETER_LON_MAX);
+}
+
+void sendPerimeterAlert(double lat, double lon, String status) {
+  String message = "ANIMAL ALERT: Animal has " + status + " perimeter!";
+  message += "\nPosition: " + String(lat, 6) + ", " + String(lon, 6);
+  message += "\nTime: " + String(gps.time.hour()) + ":" + 
+             String(gps.time.minute()) + ":" + String(gps.time.second());
+  
+  sendSMS(message);
+}
+
+void initializeSIM800L() {
+  delay(1000);
+  
+  sim800l.println("AT");
+  delay(1000);
+  while(sim800l.available()){
+    Serial.write(sim800l.read());
+  }
+  
+  sim800l.println("AT+CMGF=1");
+  delay(1000);
+  while(sim800l.available()){
+    Serial.write(sim800l.read());
+  }
+  
+  Serial.println("SIM800L Initialized");
+}
+
+void sendSMS(String message) {
+  Serial.println("Sending SMS...");
+  Serial.println(message);
+  
+  sim800l.println("AT+CMGF=1");
+  delay(1000);
+  sim800l.print("AT+CMGS=\"");
+  sim800l.print(PHONE_NUMBER);
+  sim800l.println("\"");
+  delay(1000);  
+  sim800l.print(message);
+  delay(500);
+  
+  sim800l.write(26);
+  delay(5000);
+  
+  Serial.println("SMS Sent Successfully");
+}
